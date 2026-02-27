@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "slack": {
+      "command": "uv",
+      "args": ["--directory", "/Users/barte/workspace/barte/slack-mcp-server", "run", "slack-mcp-server"],
+      "env": {
+        "SLACK_CLIENT_ID": "${SLACK_CLIENT_ID}",
+        "SLACK_CLIENT_SECRET": "${SLACK_CLIENT_SECRET}"
+      }
+    }
+  }
+}
