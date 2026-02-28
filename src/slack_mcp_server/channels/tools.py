@@ -92,10 +92,66 @@ def register_channel_tools(mcp: FastMCP) -> None:
             text = msg.get("text", "")
             ts = msg.get("ts", "")
             thread = (
-                f" [thread: {msg.get('reply_count', 0)} replies]"
+                f" [thread: {msg.get('reply_count', 0)} replies, thread_ts={ts}]"
                 if msg.get("reply_count")
                 else ""
             )
             lines.append(f"[{ts}] <{user}> {text}{thread}")
 
         return "\n".join(lines)
+
+    @mcp.tool()
+    async def get_thread_replies(
+        ctx: Context,
+        channel: str,
+        thread_ts: str,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> str:
+        """Read replies in a thread.
+
+        Args:
+            channel: Channel ID where the thread is.
+            thread_ts: Timestamp of the parent message (the thread root).
+            limit: Max number of replies to return (default 50).
+            cursor: Pagination cursor for next page.
+        """
+        app_ctx = ctx.request_context.lifespan_context
+        manager = SlackClientManager(app_ctx["token_store"], app_ctx["config"])
+        client = await manager.get_client()
+
+        kwargs: dict = {"channel": channel, "ts": thread_ts, "limit": limit}
+        if cursor:
+            kwargs["cursor"] = cursor
+
+        response = await client.conversations_replies(**kwargs)
+        messages = response.get("messages", [])
+
+        if not messages:
+            return "No replies found."
+
+        lines = []
+        for msg in messages:
+            user = msg.get("user", "unknown")
+            text = msg.get("text", "")
+            ts = msg.get("ts", "")
+            is_parent = ts == thread_ts
+            prefix = "[parent] " if is_parent else ""
+            reactions = ""
+            if msg.get("reactions"):
+                emoji_parts = [
+                    f":{r['name']}:({r.get('count', 1)})"
+                    for r in msg["reactions"]
+                ]
+                reactions = f" [{', '.join(emoji_parts)}]"
+            lines.append(f"{prefix}[{ts}] <{user}> {text}{reactions}")
+
+        result = "\n".join(lines)
+
+        next_cursor = (
+            response.get("response_metadata", {}).get("next_cursor", "") or ""
+        )
+        if next_cursor:
+            result += f"\n\n(More replies available, use cursor: '{next_cursor}')"
+
+        return result

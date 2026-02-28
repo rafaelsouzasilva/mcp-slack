@@ -82,3 +82,62 @@ async def test_get_channel_history(setup_workspace: TokenStore, config: ServerCo
         result = await client.conversations_history(channel="C001", limit=20)
         assert result["ok"] is True
         assert len(result["messages"]) == 2
+
+
+async def test_get_thread_replies(
+    setup_workspace: TokenStore, config: ServerConfig
+) -> None:
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    mock_response = AsyncMock(
+        return_value={
+            "ok": True,
+            "messages": [
+                {"user": "U1", "text": "Thread starter", "ts": "100.002"},
+                {"user": "U2", "text": "First reply", "ts": "100.003"},
+                {
+                    "user": "U3",
+                    "text": "Second reply",
+                    "ts": "100.004",
+                    "reactions": [{"name": "thumbsup", "count": 2}],
+                },
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+
+    with patch.object(AsyncWebClient, "conversations_replies", mock_response):
+        from slack_mcp_server.slack_client import SlackClientManager
+
+        manager = SlackClientManager(setup_workspace, config)
+        client = await manager.get_client()
+        result = await client.conversations_replies(
+            channel="C001", ts="100.002", limit=50
+        )
+        assert result["ok"] is True
+        assert len(result["messages"]) == 3
+        assert result["messages"][0]["ts"] == "100.002"
+
+
+async def test_get_thread_replies_empty(
+    setup_workspace: TokenStore, config: ServerConfig
+) -> None:
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    mock_response = AsyncMock(
+        return_value={
+            "ok": True,
+            "messages": [],
+        }
+    )
+
+    with patch.object(AsyncWebClient, "conversations_replies", mock_response):
+        from slack_mcp_server.slack_client import SlackClientManager
+
+        manager = SlackClientManager(setup_workspace, config)
+        client = await manager.get_client()
+        result = await client.conversations_replies(
+            channel="C001", ts="999.999", limit=50
+        )
+        assert result["ok"] is True
+        assert len(result["messages"]) == 0
