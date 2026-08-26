@@ -41,6 +41,8 @@ class ServerConfig(BaseSettings):
             "groups:read",
             "channels:history",
             "groups:history",
+            "im:history",
+            "mpim:history",
             "chat:write",
             "search:read",
             "reactions:write",
