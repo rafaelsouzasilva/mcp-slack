@@ -15,7 +15,8 @@ An MCP server that lets you interact with Slack from Claude Code or any MCP clie
 2. Set redirect URL to `http://localhost:9876/callback`
 3. Add **User Token Scopes** (not bot scopes):
    - `channels:read`, `groups:read` — list channels
-   - `channels:history`, `groups:history` — read history
+   - `channels:history`, `groups:history` — read channel history
+   - `im:history`, `mpim:history` — read DM and group DM history
    - `chat:write` — post messages
    - `search:read` — search messages
    - `reactions:write`, `reactions:read` — reactions

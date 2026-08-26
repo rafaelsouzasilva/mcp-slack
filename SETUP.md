@@ -8,7 +8,8 @@
 4. Em **Redirect URLs**, adicione: `http://localhost:9876/callback`
 5. Em **User Token Scopes** (NÃO Bot Token Scopes), adicione:
    - `channels:read`, `groups:read` — listar canais
-   - `channels:history`, `groups:history` — ler histórico
+   - `channels:history`, `groups:history` — ler histórico de canais
+   - `im:history`, `mpim:history` — ler histórico de DM e DM de grupo
    - `chat:write` — postar mensagens
    - `search:read` — buscar mensagens
    - `reactions:write`, `reactions:read` — reactions
