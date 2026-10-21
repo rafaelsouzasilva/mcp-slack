@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from mcp.server.fastmcp import Context, FastMCP
 
 from slack_mcp_server.files.download import (
@@ -9,7 +11,7 @@ from slack_mcp_server.files.download import (
 from slack_mcp_server.slack_client import SlackClientManager
 
 
-def resolve_dest_dir(subdir: str | None):
+def resolve_dest_dir(subdir: str | None) -> Path:
     if not subdir:
         return DEFAULT_DOWNLOAD_DIR.resolve()
     target = (DEFAULT_DOWNLOAD_DIR / subdir).resolve()

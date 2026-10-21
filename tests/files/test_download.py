@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlparse
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -82,6 +83,10 @@ async def server() -> TestServer:
     async def big(request: web.Request) -> web.Response:
         return web.Response(body=b"x" * 2048, content_type="application/octet-stream")
 
+    async def stall(request: web.Request) -> web.Response:
+        await asyncio.sleep(5)
+        return web.Response(body=b"late")
+
     async def signin_named_file(request: web.Request) -> web.Response:
         return web.Response(body=b"<html><h1>Signin flow</h1></html>", content_type="text/html")
 
@@ -111,6 +116,7 @@ async def server() -> TestServer:
     app.router.add_get("/big", big)
     app.router.add_get("/missing", not_found)
     app.router.add_get("/download/signin-flow.html", signin_named_file)
+    app.router.add_get("/stall", stall)
     app.router.add_get("/trickle", trickle)
     test_server = TestServer(app, host="127.0.0.1")
     await test_server.start_server()
@@ -196,6 +202,41 @@ async def test_fetch_cleans_up_when_cancelled(server: TestServer, tmp_path: Path
     assert list(tmp_path.iterdir()) == []
 
 
+async def test_fetch_removes_the_temp_file_when_cancelled_while_the_session_closes(
+    server: TestServer, tmp_path: Path
+) -> None:
+    async def cancelled_exit(self, *exc_info):
+        raise asyncio.CancelledError()
+
+    with patch.object(aiohttp.ClientSession, "__aexit__", cancelled_exit):
+        with pytest.raises(asyncio.CancelledError):
+            await fetch(server, "/file", tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_fetch_removes_the_temp_file_when_the_deadline_hits_while_the_session_closes(
+    server: TestServer, tmp_path: Path
+) -> None:
+    async def slow_exit(self, *exc_info):
+        await asyncio.sleep(5)
+
+    with patch.object(aiohttp.ClientSession, "__aexit__", slow_exit):
+        with pytest.raises(FileDownloadError, match="did not finish"):
+            await fetch(server, "/file", tmp_path, deadline_seconds=0.5)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_fetch_reports_a_stalled_read_as_a_connection_timeout(server: TestServer, tmp_path: Path) -> None:
+    timeout = aiohttp.ClientTimeout(total=None, connect=5, sock_read=0.3)
+    with patch.object(download_module.aiohttp, "ClientTimeout", return_value=timeout):
+        with pytest.raises(FileDownloadError, match="Connection to Slack timed out"):
+            await fetch(server, "/stall", tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
 async def test_fetch_reports_a_destination_that_cannot_be_created(server: TestServer, tmp_path: Path) -> None:
     blocker = tmp_path / "taken"
     blocker.write_text("a file, not a directory")
@@ -263,6 +304,7 @@ async def test_html_file_with_signin_in_its_name_is_accepted(server: TestServer,
 def test_landed_on_sign_in() -> None:
     assert download_module.landed_on_sign_in("https://acme.slack.com/?redir=%2Ffiles-pri%2FT1-F1")
     assert download_module.landed_on_sign_in("https://acme.slack.com/signin")
+    assert not download_module.landed_on_sign_in("https://acme.slack.com/files?noredir=1")
     assert not download_module.landed_on_sign_in(
         "https://files.slack.com/files-pri/T1-F1/download/signin-flow.html"
     )

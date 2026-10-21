@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import aiohttp
 from slack_sdk.errors import SlackApiError
@@ -75,7 +75,7 @@ def safe_filename(file_id: str, name: str) -> str:
 
 def landed_on_sign_in(final_url: str) -> bool:
     parsed = urlparse(final_url)
-    if "redir=" in parsed.query.lower():
+    if "redir" in {key.lower() for key in parse_qs(parsed.query)}:
         return True
     if (parsed.hostname or "").lower() == "files.slack.com":
         return False
@@ -141,8 +141,12 @@ async def _fetch(
                     if response.status != 200:
                         raise FileDownloadError(f"Download failed with HTTP {response.status}")
                     temp_path = await stream_body(response, dest_dir, max_bytes)
-                    content_type = response.headers.get("Content-Type", "")
-                return FetchResult(temp_path=temp_path, content_type=content_type, final_url=current)
+                    result = FetchResult(
+                        temp_path=temp_path,
+                        content_type=response.headers.get("Content-Type", ""),
+                        final_url=current,
+                    )
+                return result
             raise FileDownloadError(f"Too many redirects (more than {MAX_REDIRECTS})")
     except BaseException:
         if temp_path is not None:
