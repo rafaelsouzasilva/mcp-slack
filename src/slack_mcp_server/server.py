@@ -23,6 +23,7 @@ mcp = FastMCP("slack", lifespan=app_lifespan)
 # Register all tools from feature packages
 from slack_mcp_server.auth.tools import register_auth_tools  # noqa: E402
 from slack_mcp_server.channels.tools import register_channel_tools  # noqa: E402
+from slack_mcp_server.files.tools import register_file_tools  # noqa: E402
 from slack_mcp_server.messaging.tools import register_messaging_tools  # noqa: E402
 from slack_mcp_server.reactions.tools import register_reaction_tools  # noqa: E402
 from slack_mcp_server.search.tools import register_search_tools  # noqa: E402
@@ -32,3 +33,4 @@ register_messaging_tools(mcp)
 register_channel_tools(mcp)
 register_search_tools(mcp)
 register_reaction_tools(mcp)
+register_file_tools(mcp)

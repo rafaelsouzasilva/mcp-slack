@@ -48,6 +48,7 @@ class ServerConfig(BaseSettings):
             "reactions:write",
             "reactions:read",
             "users:read",
+            "files:read",
         ]),
         alias="SLACK_USER_SCOPES",
         description="Comma-separated OAuth user scopes",
