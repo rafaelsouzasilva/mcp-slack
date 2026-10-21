@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlparse
@@ -17,34 +18,28 @@ from slack_mcp_server.files.download import (
     download_file,
     fetch_to_file,
     is_slack_host,
+    is_valid_file_id,
     safe_filename,
 )
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 
-def file_info(**overrides: object) -> dict:
+
+def local_only(url: str) -> bool:
+    return urlparse(url).hostname in LOCAL_HOSTS
+
+
+def file_info(url: str = "https://files.slack.com/F1/download", **overrides: object) -> dict:
     file = {
         "id": "F1",
         "name": "vision.md",
         "mimetype": "text/markdown",
         "size": 9,
-        "url_private_download": "https://files.slack.com/F1/download",
+        "url_private_download": url,
         "permalink": "https://example.slack.com/files/U1/F1/vision.md",
     }
     file.update(overrides)
     return {"ok": True, "file": file}
-
-
-def fake_fetch(body: bytes, content_type: str) -> AsyncMock:
-    async def write(url: str, token: str, dest: Path, max_bytes: int) -> str:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(body)
-        return content_type
-
-    return AsyncMock(side_effect=write)
-
-
-def local_only(url: str) -> bool:
-    return urlparse(url).hostname == "127.0.0.1"
 
 
 @pytest.fixture
@@ -55,11 +50,33 @@ async def server() -> TestServer:
         received.append(request.headers.get("Authorization"))
         return web.Response(body=b"payload", content_type="text/plain")
 
-    async def redirect_same_host(request: web.Request) -> web.Response:
-        raise web.HTTPFound("/file")
+    async def markdown(request: web.Request) -> web.Response:
+        return web.Response(body=b"# Vision\n", content_type="text/markdown")
 
-    async def redirect_other_host(request: web.Request) -> web.Response:
+    async def legit_html(request: web.Request) -> web.Response:
+        body = b"<html><body><h1>Designing the onboarding</h1><form>sign in</form></body></html>"
+        return web.Response(body=body, content_type="text/html")
+
+    async def html_instead(request: web.Request) -> web.Response:
+        return web.Response(body=b"<html>oops</html>", content_type="text/html")
+
+    async def to_signin(request: web.Request) -> web.Response:
+        raise web.HTTPFound("/signin?redir=%2Ffiles%2FF1")
+
+    async def signin(request: web.Request) -> web.Response:
+        return web.Response(body=b"<html>Sign in</html>", content_type="text/html")
+
+    async def redirect_other_allowed_host(request: web.Request) -> web.Response:
+        raise web.HTTPFound(f"http://localhost:{request.url.port}/file")
+
+    async def redirect_disallowed_host(request: web.Request) -> web.Response:
         raise web.HTTPFound("https://evil.example.com/steal")
+
+    async def redirect_without_location(request: web.Request) -> web.Response:
+        return web.Response(status=302)
+
+    async def redirect_loop(request: web.Request) -> web.Response:
+        raise web.HTTPFound("/loop")
 
     async def big(request: web.Request) -> web.Response:
         return web.Response(body=b"x" * 2048, content_type="application/octet-stream")
@@ -67,12 +84,28 @@ async def server() -> TestServer:
     async def not_found(request: web.Request) -> web.Response:
         return web.Response(status=404)
 
+    async def trickle(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse()
+        await response.prepare(request)
+        for _ in range(50):
+            await response.write(b"x")
+            await asyncio.sleep(0.1)
+        return response
+
     app = web.Application()
     app.router.add_get("/file", file_handler)
-    app.router.add_get("/redirect-same", redirect_same_host)
-    app.router.add_get("/redirect-other", redirect_other_host)
+    app.router.add_get("/vision.md", markdown)
+    app.router.add_get("/legit.html", legit_html)
+    app.router.add_get("/html-instead", html_instead)
+    app.router.add_get("/to-signin", to_signin)
+    app.router.add_get("/signin", signin)
+    app.router.add_get("/redirect-other-allowed", redirect_other_allowed_host)
+    app.router.add_get("/redirect-disallowed", redirect_disallowed_host)
+    app.router.add_get("/redirect-no-location", redirect_without_location)
+    app.router.add_get("/loop", redirect_loop)
     app.router.add_get("/big", big)
     app.router.add_get("/missing", not_found)
+    app.router.add_get("/trickle", trickle)
     test_server = TestServer(app, host="127.0.0.1")
     await test_server.start_server()
     test_server.received = received  # type: ignore[attr-defined]
@@ -80,51 +113,91 @@ async def server() -> TestServer:
     await test_server.close()
 
 
-async def test_fetch_sends_the_token_and_writes_the_body(server: TestServer, tmp_path: Path) -> None:
-    dest = tmp_path / "out.txt"
+def url(server: TestServer, path: str) -> str:
+    return str(server.make_url(path))
 
-    content_type = await fetch_to_file(str(server.make_url("/file")), "xoxp-test", dest, is_allowed=local_only)
 
-    assert dest.read_bytes() == b"payload"
-    assert content_type.startswith("text/plain")
+async def fetch(server: TestServer, path: str, dest_dir: Path, **kwargs: object):
+    return await fetch_to_file(url(server, path), "xoxp-test", dest_dir, is_allowed=local_only, **kwargs)
+
+
+async def test_fetch_sends_the_token_and_streams_into_a_temporary_file(server: TestServer, tmp_path: Path) -> None:
+    result = await fetch(server, "/file", tmp_path)
+
+    assert result.temp_path.parent == tmp_path
+    assert result.temp_path.name.startswith(".partial-")
+    assert result.temp_path.read_bytes() == b"payload"
+    assert result.content_type.startswith("text/plain")
     assert server.received == ["Bearer xoxp-test"]  # type: ignore[attr-defined]
 
 
-async def test_fetch_reapplies_the_token_on_a_same_host_redirect(server: TestServer, tmp_path: Path) -> None:
-    dest = tmp_path / "out.txt"
+async def test_fetch_reapplies_the_token_on_a_redirect_to_another_allowed_host(
+    server: TestServer, tmp_path: Path
+) -> None:
+    result = await fetch(server, "/redirect-other-allowed", tmp_path)
 
-    await fetch_to_file(str(server.make_url("/redirect-same")), "xoxp-test", dest, is_allowed=local_only)
-
-    assert dest.read_bytes() == b"payload"
+    assert result.temp_path.read_bytes() == b"payload"
+    assert urlparse(result.final_url).hostname == "localhost"
     assert server.received == ["Bearer xoxp-test"]  # type: ignore[attr-defined]
 
 
-async def test_fetch_refuses_to_follow_a_redirect_to_another_host(server: TestServer, tmp_path: Path) -> None:
-    dest = tmp_path / "out.txt"
-
+async def test_fetch_refuses_to_follow_a_redirect_to_a_disallowed_host(server: TestServer, tmp_path: Path) -> None:
     with pytest.raises(FileDownloadError, match="evil.example.com"):
-        await fetch_to_file(str(server.make_url("/redirect-other")), "xoxp-test", dest, is_allowed=local_only)
+        await fetch(server, "/redirect-disallowed", tmp_path)
 
-    assert not dest.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_fetch_reports_a_redirect_without_location(server: TestServer, tmp_path: Path) -> None:
+    with pytest.raises(FileDownloadError, match="Location"):
+        await fetch(server, "/redirect-no-location", tmp_path)
+
+
+async def test_fetch_stops_a_redirect_loop(server: TestServer, tmp_path: Path) -> None:
+    with pytest.raises(FileDownloadError, match="Too many redirects"):
+        await fetch(server, "/loop", tmp_path)
 
 
 async def test_fetch_aborts_above_the_size_limit_without_leaving_files(server: TestServer, tmp_path: Path) -> None:
-    dest = tmp_path / "out.bin"
-
     with pytest.raises(FileDownloadError, match="1024 byte limit"):
-        await fetch_to_file(str(server.make_url("/big")), "xoxp-test", dest, max_bytes=1024, is_allowed=local_only)
+        await fetch(server, "/big", tmp_path, max_bytes=1024)
 
     assert list(tmp_path.iterdir()) == []
 
 
 async def test_fetch_reports_a_non_200_status(server: TestServer, tmp_path: Path) -> None:
     with pytest.raises(FileDownloadError, match="HTTP 404"):
-        await fetch_to_file(str(server.make_url("/missing")), "xoxp-test", tmp_path / "out", is_allowed=local_only)
+        await fetch(server, "/missing", tmp_path)
+
+
+async def test_fetch_gives_up_on_a_trickling_download_and_cleans_up(server: TestServer, tmp_path: Path) -> None:
+    with pytest.raises(FileDownloadError, match="did not finish within 0.5 seconds"):
+        await fetch(server, "/trickle", tmp_path, deadline_seconds=0.5)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_fetch_cleans_up_when_cancelled(server: TestServer, tmp_path: Path) -> None:
+    task = asyncio.create_task(fetch(server, "/trickle", tmp_path))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_fetch_reports_a_destination_that_cannot_be_created(server: TestServer, tmp_path: Path) -> None:
+    blocker = tmp_path / "taken"
+    blocker.write_text("a file, not a directory")
+
+    with pytest.raises(FileDownloadError, match="Could not write the file"):
+        await fetch(server, "/file", blocker / "sub")
 
 
 async def test_fetch_refuses_a_non_slack_url_by_default(tmp_path: Path) -> None:
     with pytest.raises(FileDownloadError, match="drive.google.com"):
-        await fetch_to_file("https://drive.google.com/file/d/abc", "xoxp-test", tmp_path / "out")
+        await fetch_to_file("https://drive.google.com/file/d/abc", "xoxp-test", tmp_path)
 
 
 def test_is_slack_host() -> None:
@@ -135,119 +208,138 @@ def test_is_slack_host() -> None:
     assert not is_slack_host("https://docs.google.com/x")
 
 
-async def test_text_file_is_saved_and_returned_inline(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    fetch = fake_fetch(b"# Vision\n", "text/markdown")
-    with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=file_info())), \
-            patch.object(download_module, "fetch_to_file", fetch):
-        result = await download_file(client, "F1", tmp_path)
+def test_is_valid_file_id() -> None:
+    assert is_valid_file_id("F0ABC123")
+    assert not is_valid_file_id("F123\n")
+    assert not is_valid_file_id("../../etc")
+    assert not is_valid_file_id("f123")
+
+
+def slack_client() -> AsyncWebClient:
+    return AsyncWebClient(token="xoxp-test")
+
+
+async def download_from(server: TestServer, tmp_path: Path, path: str, **info: object):
+    files_info = AsyncMock(return_value=file_info(url(server, path), **info))
+    with patch.object(AsyncWebClient, "files_info", files_info), \
+            patch.object(download_module, "is_slack_host", local_only):
+        return await download_file(slack_client(), "F1", tmp_path)
+
+
+async def test_text_file_is_saved_and_returned_inline(server: TestServer, tmp_path: Path) -> None:
+    result = await download_from(server, tmp_path, "/vision.md")
 
     assert result.path == tmp_path / "F1-vision.md"
     assert result.path.read_bytes() == b"# Vision\n"
     assert result.text == "# Vision\n"
     assert result.truncated is False
-    assert fetch.await_args.args[:2] == ("https://files.slack.com/F1/download", "xoxp-test")
+    assert list(tmp_path.iterdir()) == [result.path]
 
 
-async def test_large_text_file_is_truncated_inline_but_complete_on_disk(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    body = b"a" * (INLINE_TEXT_LIMIT_BYTES + 10)
-    with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=file_info(size=len(body)))), \
-            patch.object(download_module, "fetch_to_file", fake_fetch(body, "text/markdown")):
-        result = await download_file(client, "F1", tmp_path)
+async def test_legitimate_html_file_is_accepted(server: TestServer, tmp_path: Path) -> None:
+    result = await download_from(server, tmp_path, "/legit.html", name="report.html", mimetype="text/html", size=80)
 
-    assert result.size == len(body)
-    assert result.truncated is True
-    assert result.text == "a" * INLINE_TEXT_LIMIT_BYTES
+    assert result.path == tmp_path / "F1-report.html"
+    assert b"Designing the onboarding" in result.path.read_bytes()
 
 
-async def test_binary_file_is_saved_without_inline_text(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    info = file_info(name="shot.png", mimetype="image/png")
-    with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=info)), \
-            patch.object(download_module, "fetch_to_file", fake_fetch(b"\x89PNG", "image/png")):
-        result = await download_file(client, "F1", tmp_path)
+async def test_html_instead_of_the_file_keeps_the_previous_copy(server: TestServer, tmp_path: Path) -> None:
+    previous = tmp_path / "F1-vision.md"
+    previous.write_bytes(b"good copy")
 
-    assert result.path.read_bytes() == b"\x89PNG"
-    assert result.text is None
+    with pytest.raises(FileDownloadError, match="HTML page"):
+        await download_from(server, tmp_path, "/html-instead")
+
+    assert previous.read_bytes() == b"good copy"
+    assert list(tmp_path.iterdir()) == [previous]
 
 
-async def test_html_instead_of_the_file_is_reported_and_removed(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=file_info())), \
-            patch.object(download_module, "fetch_to_file", fake_fetch(b"<html>", "text/html; charset=utf-8")):
-        with pytest.raises(FileDownloadError, match="HTML page"):
-            await download_file(client, "F1", tmp_path)
+async def test_sign_in_redirect_is_rejected_even_for_an_html_file(server: TestServer, tmp_path: Path) -> None:
+    with pytest.raises(FileDownloadError, match="HTML page"):
+        await download_from(server, tmp_path, "/to-signin", name="page.html", mimetype="text/html")
 
     assert list(tmp_path.iterdir()) == []
 
 
-async def test_login_page_is_rejected_even_for_an_html_file(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    info = file_info(name="page.html", mimetype="text/html")
-    login = b"<html><form action='/signin'>Sign in to Slack</form></html>"
-    with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=info)), \
-            patch.object(download_module, "fetch_to_file", fake_fetch(login, "text/html")):
-        with pytest.raises(FileDownloadError, match="HTML page"):
-            await download_file(client, "F1", tmp_path)
+async def test_large_text_file_is_truncated_inline_but_complete_on_disk(tmp_path: Path) -> None:
+    body = b"a" * (INLINE_TEXT_LIMIT_BYTES + 10)
+    temp = tmp_path / ".partial-test"
+    temp.write_bytes(body)
+    fetched = download_module.FetchResult(temp, "text/markdown", "https://files.slack.com/F1/download")
+    with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=file_info(size=len(body)))), \
+            patch.object(download_module, "fetch_to_file", AsyncMock(return_value=fetched)):
+        result = await download_file(slack_client(), "F1", tmp_path)
+
+    assert result.size == len(body)
+    assert result.path.read_bytes() == body
+    assert result.truncated is True
+    assert result.text == "a" * INLINE_TEXT_LIMIT_BYTES
+
+
+async def test_response_id_that_is_not_a_file_id_falls_back_to_the_requested_id(
+    server: TestServer, tmp_path: Path
+) -> None:
+    result = await download_from(server, tmp_path, "/vision.md", id="../evil")
+
+    assert result.path == tmp_path / "F1-vision.md"
 
 
 async def test_external_file_is_not_downloaded(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
     info = file_info(is_external=True, mode="external", url_private="https://docs.google.com/doc")
-    fetch = fake_fetch(b"", "")
+    fetch_mock = AsyncMock()
     with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=info)), \
-            patch.object(download_module, "fetch_to_file", fetch):
+            patch.object(download_module, "fetch_to_file", fetch_mock):
         with pytest.raises(FileDownloadError, match="not stored in Slack"):
-            await download_file(client, "F1", tmp_path)
+            await download_file(slack_client(), "F1", tmp_path)
 
-    fetch.assert_not_awaited()
+    fetch_mock.assert_not_awaited()
 
 
 async def test_native_slack_document_is_not_downloaded(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    fetch = fake_fetch(b"", "")
+    fetch_mock = AsyncMock()
     with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=file_info(filetype="canvas"))), \
-            patch.object(download_module, "fetch_to_file", fetch):
+            patch.object(download_module, "fetch_to_file", fetch_mock):
         with pytest.raises(FileDownloadError, match="native Slack document"):
-            await download_file(client, "F1", tmp_path)
+            await download_file(slack_client(), "F1", tmp_path)
 
-    fetch.assert_not_awaited()
+    fetch_mock.assert_not_awaited()
 
 
 async def test_file_above_the_limit_is_refused_before_downloading(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
-    fetch = fake_fetch(b"", "")
+    fetch_mock = AsyncMock()
     with patch.object(AsyncWebClient, "files_info", AsyncMock(return_value=file_info(size=5000))), \
-            patch.object(download_module, "fetch_to_file", fetch):
+            patch.object(download_module, "fetch_to_file", fetch_mock):
         with pytest.raises(FileDownloadError, match="5000 bytes"):
-            await download_file(client, "F1", tmp_path, max_bytes=1000)
+            await download_file(slack_client(), "F1", tmp_path, max_bytes=1000)
 
-    fetch.assert_not_awaited()
+    fetch_mock.assert_not_awaited()
 
 
 async def test_missing_scope_is_explained(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
     error = SlackApiError("missing_scope", {"ok": False, "error": "missing_scope"})
     with patch.object(AsyncWebClient, "files_info", AsyncMock(side_effect=error)):
         with pytest.raises(FileDownloadError, match="files:read"):
-            await download_file(client, "F1", tmp_path)
+            await download_file(slack_client(), "F1", tmp_path)
 
 
 async def test_other_api_errors_are_reported_by_code(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
     error = SlackApiError("file_not_found", {"ok": False, "error": "file_not_found"})
     with patch.object(AsyncWebClient, "files_info", AsyncMock(side_effect=error)):
         with pytest.raises(FileDownloadError, match="file_not_found"):
-            await download_file(client, "F1", tmp_path)
+            await download_file(slack_client(), "F1", tmp_path)
+
+
+async def test_network_error_on_files_info_is_reported(tmp_path: Path) -> None:
+    with patch.object(AsyncWebClient, "files_info", AsyncMock(side_effect=asyncio.TimeoutError())):
+        with pytest.raises(FileDownloadError, match="files.info"):
+            await download_file(slack_client(), "F1", tmp_path)
 
 
 async def test_invalid_file_id_is_rejected_before_calling_slack(tmp_path: Path) -> None:
-    client = AsyncWebClient(token="xoxp-test")
     info = AsyncMock(return_value=file_info())
     with patch.object(AsyncWebClient, "files_info", info):
         with pytest.raises(FileDownloadError, match="Invalid Slack file id"):
-            await download_file(client, "../../etc", tmp_path)
+            await download_file(slack_client(), "F123\n", tmp_path)
 
     info.assert_not_awaited()
 

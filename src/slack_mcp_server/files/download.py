@@ -24,15 +24,23 @@ UNAVAILABLE_MODES = {"external", "tombstone", "hidden_by_limit"}
 
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 INLINE_TEXT_LIMIT_BYTES = 64 * 1024
+DOWNLOAD_DEADLINE_SECONDS = 300.0
 MAX_REDIRECTS = 5
 CHUNK_SIZE = 64 * 1024
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
-FILE_ID_PATTERN = re.compile(r"^F[A-Z0-9]+$")
-LOGIN_PAGE_MARKERS = (b"signin", b"sign in", b"slack-login", b"<form")
+FILE_ID_PATTERN = re.compile(r"F[A-Z0-9]+")
 
 
 class FileDownloadError(Exception):
     pass
+
+
+@dataclass
+class FetchResult:
+    temp_path: Path
+    content_type: str
+    final_url: str
 
 
 @dataclass
@@ -52,6 +60,10 @@ def is_slack_host(url: str) -> bool:
     return parsed.scheme == "https" and (host == "slack.com" or host.endswith(".slack.com"))
 
 
+def is_valid_file_id(file_id: str) -> bool:
+    return FILE_ID_PATTERN.fullmatch(file_id) is not None
+
+
 def is_text_file(name: str, mimetype: str) -> bool:
     return mimetype.startswith("text/") or Path(name).suffix.lower() in TEXT_EXTENSIONS
 
@@ -61,54 +73,77 @@ def safe_filename(file_id: str, name: str) -> str:
     return f"{file_id}-{cleaned}"
 
 
-def looks_like_login_page(head: bytes) -> bool:
-    lowered = head.lower()
-    return any(marker in lowered for marker in LOGIN_PAGE_MARKERS)
+def landed_on_sign_in(final_url: str) -> bool:
+    parsed = urlparse(final_url)
+    return "signin" in parsed.path.lower() or "redir=" in parsed.query.lower()
 
 
 async def fetch_to_file(
     url: str,
     token: str,
-    dest: Path,
+    dest_dir: Path,
     max_bytes: int = MAX_DOWNLOAD_BYTES,
-    is_allowed: Callable[[str], bool] = is_slack_host,
-) -> str:
-    """Stream url into dest, sending the token only to allowed hosts.
+    is_allowed: Callable[[str], bool] | None = None,
+    deadline_seconds: float = DOWNLOAD_DEADLINE_SECONDS,
+) -> FetchResult:
+    """Stream url into a temporary file in dest_dir, sending the token only to allowed hosts.
 
     Redirects are followed by hand so the Authorization header is reapplied,
-    and only while the target stays on an allowed host. Returns the final
-    response Content-Type.
+    and only while the target stays on an allowed host. The caller decides
+    whether to promote or discard the temporary file.
     """
+    allowed = is_allowed or is_slack_host
+    try:
+        return await asyncio.wait_for(
+            _fetch(url, token, dest_dir, max_bytes, allowed), timeout=deadline_seconds
+        )
+    except asyncio.TimeoutError as exc:
+        raise FileDownloadError(f"Download did not finish within {deadline_seconds:g} seconds") from exc
+    except aiohttp.ClientError as exc:
+        raise FileDownloadError(f"Network error while downloading: {exc!r}") from exc
+    except OSError as exc:
+        raise FileDownloadError(f"Could not write the file: {exc}") from exc
+
+
+async def _fetch(
+    url: str,
+    token: str,
+    dest_dir: Path,
+    max_bytes: int,
+    allowed: Callable[[str], bool],
+) -> FetchResult:
     headers = {"Authorization": f"Bearer {token}"}
-    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=60)
+    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=60)
     current = url
 
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for _ in range(MAX_REDIRECTS + 1):
-                if not is_allowed(current):
-                    raise FileDownloadError(
-                        f"Refusing to send the Slack token to {urlparse(current).hostname}"
-                    )
-                async with session.get(current, headers=headers, allow_redirects=False) as response:
-                    if response.status in (301, 302, 303, 307, 308):
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise FileDownloadError("Redirect without a Location header")
-                        current = urljoin(current, location)
-                        continue
-                    if response.status != 200:
-                        raise FileDownloadError(f"Download failed with HTTP {response.status}")
-                    await stream_body(response, dest, max_bytes)
-                    return response.headers.get("Content-Type", "")
-            raise FileDownloadError(f"Too many redirects (more than {MAX_REDIRECTS})")
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        raise FileDownloadError(f"Network error while downloading: {exc!r}") from exc
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for _ in range(MAX_REDIRECTS + 1):
+            if not allowed(current):
+                raise FileDownloadError(
+                    f"Refusing to send the Slack token to {urlparse(current).hostname}"
+                )
+            async with session.get(current, headers=headers, allow_redirects=False) as response:
+                if response.status in REDIRECT_STATUSES:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise FileDownloadError("Redirect without a Location header")
+                    current = urljoin(current, location)
+                    continue
+                if response.status != 200:
+                    raise FileDownloadError(f"Download failed with HTTP {response.status}")
+                temp_path = await stream_body(response, dest_dir, max_bytes)
+                return FetchResult(
+                    temp_path=temp_path,
+                    content_type=response.headers.get("Content-Type", ""),
+                    final_url=current,
+                )
+        raise FileDownloadError(f"Too many redirects (more than {MAX_REDIRECTS})")
 
 
-async def stream_body(response: aiohttp.ClientResponse, dest: Path, max_bytes: int) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".partial-")
+async def stream_body(response: aiohttp.ClientResponse, dest_dir: Path, max_bytes: int) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest_dir, prefix=".partial-")
+    temp_path = Path(tmp_name)
     written = 0
     try:
         with os.fdopen(fd, "wb") as out:
@@ -117,10 +152,10 @@ async def stream_body(response: aiohttp.ClientResponse, dest: Path, max_bytes: i
                 if written > max_bytes:
                     raise FileDownloadError(f"File is larger than the {max_bytes} byte limit")
                 out.write(chunk)
-        os.replace(tmp_name, dest)
     except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
+        temp_path.unlink(missing_ok=True)
         raise
+    return temp_path
 
 
 async def get_file_info(client: AsyncWebClient, file_id: str) -> dict:
@@ -134,7 +169,15 @@ async def get_file_info(client: AsyncWebClient, file_id: str) -> dict:
                 "User Token Scopes and re-authenticate."
             ) from exc
         raise FileDownloadError(f"Slack API error: {error}") from exc
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        raise FileDownloadError(f"Network error while calling files.info: {exc!r}") from exc
     return info.get("file") or {}
+
+
+def is_unexpected_html(content_type: str, mimetype: str, final_url: str) -> bool:
+    if not content_type.startswith("text/html"):
+        return False
+    return not mimetype.startswith("text/html") or landed_on_sign_in(final_url)
 
 
 async def download_file(
@@ -143,11 +186,12 @@ async def download_file(
     dest_dir: Path = DEFAULT_DOWNLOAD_DIR,
     max_bytes: int = MAX_DOWNLOAD_BYTES,
 ) -> DownloadedFile:
-    if not FILE_ID_PATTERN.match(file_id):
+    if not is_valid_file_id(file_id):
         raise FileDownloadError(f"Invalid Slack file id: {file_id!r}")
 
     file = await get_file_info(client, file_id)
-    resolved_id = file.get("id") or file_id
+    response_id = file.get("id")
+    resolved_id = response_id if isinstance(response_id, str) and is_valid_file_id(response_id) else file_id
     name = file.get("name") or file.get("title") or resolved_id
     mimetype = file.get("mimetype", "")
 
@@ -168,23 +212,27 @@ async def download_file(
     if not url:
         raise FileDownloadError(f"File {resolved_id} has no downloadable content")
 
-    path = dest_dir / safe_filename(resolved_id, name)
-    content_type = await fetch_to_file(url, client.token or "", path, max_bytes)
-
-    with path.open("rb") as handle:
-        head = handle.read(INLINE_TEXT_LIMIT_BYTES)
-    if content_type.startswith("text/html") and (
-        not mimetype.startswith("text/html") or looks_like_login_page(head)
-    ):
-        path.unlink(missing_ok=True)
-        raise FileDownloadError(
-            "Slack returned an HTML page instead of the file (session or permission problem)"
-        )
+    fetched = await fetch_to_file(url, client.token or "", dest_dir, max_bytes)
+    try:
+        if is_unexpected_html(fetched.content_type, mimetype, fetched.final_url):
+            raise FileDownloadError(
+                "Slack returned an HTML page instead of the file (session or permission problem)"
+            )
+        path = dest_dir / safe_filename(resolved_id, name)
+        os.replace(fetched.temp_path, path)
+    except OSError as exc:
+        fetched.temp_path.unlink(missing_ok=True)
+        raise FileDownloadError(f"Could not write the file: {exc}") from exc
+    except BaseException:
+        fetched.temp_path.unlink(missing_ok=True)
+        raise
 
     actual_size = path.stat().st_size
     text = None
     truncated = False
     if is_text_file(name, mimetype):
+        with path.open("rb") as handle:
+            head = handle.read(INLINE_TEXT_LIMIT_BYTES)
         text = head.decode("utf-8", errors="replace")
         truncated = actual_size > INLINE_TEXT_LIMIT_BYTES
 

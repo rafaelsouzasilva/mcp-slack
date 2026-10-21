@@ -11,7 +11,7 @@ from slack_mcp_server.slack_client import SlackClientManager
 
 def resolve_dest_dir(subdir: str | None):
     if not subdir:
-        return DEFAULT_DOWNLOAD_DIR
+        return DEFAULT_DOWNLOAD_DIR.resolve()
     target = (DEFAULT_DOWNLOAD_DIR / subdir).resolve()
     if not target.is_relative_to(DEFAULT_DOWNLOAD_DIR.resolve()):
         raise FileDownloadError(f"subdir must stay inside {DEFAULT_DOWNLOAD_DIR}")

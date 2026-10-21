@@ -7,7 +7,7 @@ from slack_mcp_server.files.tools import resolve_dest_dir
 
 
 def test_default_destination() -> None:
-    assert resolve_dest_dir(None) == DEFAULT_DOWNLOAD_DIR
+    assert resolve_dest_dir(None) == DEFAULT_DOWNLOAD_DIR.resolve()
 
 
 def test_subdir_stays_inside_the_download_dir() -> None:

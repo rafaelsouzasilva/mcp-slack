@@ -26,7 +26,11 @@ def format_message(msg: dict) -> str:
     return line
 
 
-def format_thread(messages: list[dict], thread_ts: str, paginated: bool) -> str:
-    if paginated and messages and messages[0].get("ts") == thread_ts:
+def is_thread_parent(msg: dict) -> bool:
+    return msg.get("ts") is not None and msg.get("ts") == msg.get("thread_ts")
+
+
+def format_thread(messages: list[dict], paginated: bool) -> str:
+    if paginated and messages and is_thread_parent(messages[0]):
         messages = messages[1:]
     return "\n".join(format_message(msg) for msg in messages)

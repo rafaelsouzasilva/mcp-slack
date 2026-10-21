@@ -123,7 +123,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         if not messages:
             return "No messages found."
 
-        result = format_thread(messages, thread_ts, paginated=cursor is not None)
+        result = format_thread(messages, paginated=bool(cursor))
 
         next_cursor = (
             response.get("response_metadata", {}).get("next_cursor", "") or ""

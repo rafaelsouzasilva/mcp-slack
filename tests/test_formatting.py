@@ -29,10 +29,21 @@ def test_format_file_without_size_or_name() -> None:
 
 
 def test_format_thread_keeps_the_parent_on_the_first_page() -> None:
-    messages = [{"user": "U1", "text": "parent", "ts": "1.0"}, {"user": "U2", "text": "reply", "ts": "1.1"}]
-    assert format_thread(messages, "1.0", paginated=False) == "[1.0] <U1> parent\n[1.1] <U2> reply"
+    messages = [
+        {"user": "U1", "text": "parent", "ts": "1.0", "thread_ts": "1.0"},
+        {"user": "U2", "text": "reply", "ts": "1.1", "thread_ts": "1.0"},
+    ]
+    assert format_thread(messages, paginated=False) == "[1.0] <U1> parent\n[1.1] <U2> reply"
 
 
 def test_format_thread_drops_the_repeated_parent_on_later_pages() -> None:
-    messages = [{"user": "U1", "text": "parent", "ts": "1.0"}, {"user": "U3", "text": "later", "ts": "1.5"}]
-    assert format_thread(messages, "1.0", paginated=True) == "[1.5] <U3> later"
+    messages = [
+        {"user": "U1", "text": "parent", "ts": "1.0", "thread_ts": "1.0"},
+        {"user": "U3", "text": "later", "ts": "1.5", "thread_ts": "1.0"},
+    ]
+    assert format_thread(messages, paginated=True) == "[1.5] <U3> later"
+
+
+def test_format_thread_keeps_a_reply_that_opens_a_later_page() -> None:
+    messages = [{"user": "U3", "text": "later", "ts": "1.5", "thread_ts": "1.0"}]
+    assert format_thread(messages, paginated=True) == "[1.5] <U3> later"
