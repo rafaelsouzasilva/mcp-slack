@@ -45,6 +45,7 @@ def file_info(url: str = "https://files.slack.com/F1/download", **overrides: obj
 @pytest.fixture
 async def server() -> TestServer:
     received: list[str | None] = []
+    streaming = asyncio.Event()
 
     async def file_handler(request: web.Request) -> web.Response:
         received.append(request.headers.get("Authorization"))
@@ -81,6 +82,9 @@ async def server() -> TestServer:
     async def big(request: web.Request) -> web.Response:
         return web.Response(body=b"x" * 2048, content_type="application/octet-stream")
 
+    async def signin_named_file(request: web.Request) -> web.Response:
+        return web.Response(body=b"<html><h1>Signin flow</h1></html>", content_type="text/html")
+
     async def not_found(request: web.Request) -> web.Response:
         return web.Response(status=404)
 
@@ -89,6 +93,7 @@ async def server() -> TestServer:
         await response.prepare(request)
         for _ in range(50):
             await response.write(b"x")
+            streaming.set()
             await asyncio.sleep(0.1)
         return response
 
@@ -105,10 +110,12 @@ async def server() -> TestServer:
     app.router.add_get("/loop", redirect_loop)
     app.router.add_get("/big", big)
     app.router.add_get("/missing", not_found)
+    app.router.add_get("/download/signin-flow.html", signin_named_file)
     app.router.add_get("/trickle", trickle)
     test_server = TestServer(app, host="127.0.0.1")
     await test_server.start_server()
     test_server.received = received  # type: ignore[attr-defined]
+    test_server.streaming = streaming  # type: ignore[attr-defined]
     yield test_server  # type: ignore[misc]
     await test_server.close()
 
@@ -179,7 +186,9 @@ async def test_fetch_gives_up_on_a_trickling_download_and_cleans_up(server: Test
 
 async def test_fetch_cleans_up_when_cancelled(server: TestServer, tmp_path: Path) -> None:
     task = asyncio.create_task(fetch(server, "/trickle", tmp_path))
-    await asyncio.sleep(0.3)
+    await asyncio.wait_for(server.streaming.wait(), timeout=5)  # type: ignore[attr-defined]
+    await asyncio.sleep(0.05)
+    assert [p.name.startswith(".partial-") for p in tmp_path.iterdir()] == [True]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -241,6 +250,23 @@ async def test_legitimate_html_file_is_accepted(server: TestServer, tmp_path: Pa
 
     assert result.path == tmp_path / "F1-report.html"
     assert b"Designing the onboarding" in result.path.read_bytes()
+
+
+async def test_html_file_with_signin_in_its_name_is_accepted(server: TestServer, tmp_path: Path) -> None:
+    result = await download_from(
+        server, tmp_path, "/download/signin-flow.html", name="signin-flow.html", mimetype="text/html", size=33
+    )
+
+    assert result.path == tmp_path / "F1-signin-flow.html"
+
+
+def test_landed_on_sign_in() -> None:
+    assert download_module.landed_on_sign_in("https://acme.slack.com/?redir=%2Ffiles-pri%2FT1-F1")
+    assert download_module.landed_on_sign_in("https://acme.slack.com/signin")
+    assert not download_module.landed_on_sign_in(
+        "https://files.slack.com/files-pri/T1-F1/download/signin-flow.html"
+    )
+    assert not download_module.landed_on_sign_in("https://files.slack.com/files-pri/T1-F1/download/signin")
 
 
 async def test_html_instead_of_the_file_keeps_the_previous_copy(server: TestServer, tmp_path: Path) -> None:

@@ -75,7 +75,12 @@ def safe_filename(file_id: str, name: str) -> str:
 
 def landed_on_sign_in(final_url: str) -> bool:
     parsed = urlparse(final_url)
-    return "signin" in parsed.path.lower() or "redir=" in parsed.query.lower()
+    if "redir=" in parsed.query.lower():
+        return True
+    if (parsed.hostname or "").lower() == "files.slack.com":
+        return False
+    segments = [segment.lower() for segment in parsed.path.split("/") if segment]
+    return "signin" in segments
 
 
 async def fetch_to_file(
@@ -97,6 +102,8 @@ async def fetch_to_file(
         return await asyncio.wait_for(
             _fetch(url, token, dest_dir, max_bytes, allowed), timeout=deadline_seconds
         )
+    except aiohttp.ServerTimeoutError as exc:
+        raise FileDownloadError(f"Connection to Slack timed out: {exc!r}") from exc
     except asyncio.TimeoutError as exc:
         raise FileDownloadError(f"Download did not finish within {deadline_seconds:g} seconds") from exc
     except aiohttp.ClientError as exc:
@@ -115,29 +122,32 @@ async def _fetch(
     headers = {"Authorization": f"Bearer {token}"}
     timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=60)
     current = url
+    temp_path: Path | None = None
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for _ in range(MAX_REDIRECTS + 1):
-            if not allowed(current):
-                raise FileDownloadError(
-                    f"Refusing to send the Slack token to {urlparse(current).hostname}"
-                )
-            async with session.get(current, headers=headers, allow_redirects=False) as response:
-                if response.status in REDIRECT_STATUSES:
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise FileDownloadError("Redirect without a Location header")
-                    current = urljoin(current, location)
-                    continue
-                if response.status != 200:
-                    raise FileDownloadError(f"Download failed with HTTP {response.status}")
-                temp_path = await stream_body(response, dest_dir, max_bytes)
-                return FetchResult(
-                    temp_path=temp_path,
-                    content_type=response.headers.get("Content-Type", ""),
-                    final_url=current,
-                )
-        raise FileDownloadError(f"Too many redirects (more than {MAX_REDIRECTS})")
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for _ in range(MAX_REDIRECTS + 1):
+                if not allowed(current):
+                    raise FileDownloadError(
+                        f"Refusing to send the Slack token to {urlparse(current).hostname}"
+                    )
+                async with session.get(current, headers=headers, allow_redirects=False) as response:
+                    if response.status in REDIRECT_STATUSES:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise FileDownloadError("Redirect without a Location header")
+                        current = urljoin(current, location)
+                        continue
+                    if response.status != 200:
+                        raise FileDownloadError(f"Download failed with HTTP {response.status}")
+                    temp_path = await stream_body(response, dest_dir, max_bytes)
+                    content_type = response.headers.get("Content-Type", "")
+                return FetchResult(temp_path=temp_path, content_type=content_type, final_url=current)
+            raise FileDownloadError(f"Too many redirects (more than {MAX_REDIRECTS})")
+    except BaseException:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 async def stream_body(response: aiohttp.ClientResponse, dest_dir: Path, max_bytes: int) -> Path:
@@ -227,14 +237,17 @@ async def download_file(
         fetched.temp_path.unlink(missing_ok=True)
         raise
 
-    actual_size = path.stat().st_size
     text = None
     truncated = False
-    if is_text_file(name, mimetype):
-        with path.open("rb") as handle:
-            head = handle.read(INLINE_TEXT_LIMIT_BYTES)
-        text = head.decode("utf-8", errors="replace")
-        truncated = actual_size > INLINE_TEXT_LIMIT_BYTES
+    try:
+        actual_size = path.stat().st_size
+        if is_text_file(name, mimetype):
+            with path.open("rb") as handle:
+                head = handle.read(INLINE_TEXT_LIMIT_BYTES)
+            text = head.decode("utf-8", errors="replace")
+            truncated = actual_size > INLINE_TEXT_LIMIT_BYTES
+    except OSError as exc:
+        raise FileDownloadError(f"Saved to {path} but could not read it back: {exc}") from exc
 
     return DownloadedFile(
         file_id=resolved_id,
