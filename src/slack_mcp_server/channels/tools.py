@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import Context, FastMCP
 
-from slack_mcp_server.formatting import format_message
+from slack_mcp_server.formatting import format_message, format_thread
 from slack_mcp_server.slack_client import SlackClientManager
 
 
@@ -99,7 +99,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Read a thread: the parent message followed by its replies, oldest first.
 
-        Shared files are listed as [file: name (F0123..., mimetype)]; use get_file
+        Shared files are listed as [file: name (F0123..., mimetype, size)]; use get_file
         with the id to read one.
 
         Args:
@@ -123,7 +123,7 @@ def register_channel_tools(mcp: FastMCP) -> None:
         if not messages:
             return "No messages found."
 
-        result = "\n".join(format_message(msg) for msg in messages)
+        result = format_thread(messages, thread_ts, paginated=cursor is not None)
 
         next_cursor = (
             response.get("response_metadata", {}).get("next_cursor", "") or ""

@@ -74,7 +74,7 @@ Restart Claude Code, then use tools like `post_message`, `search_messages`, `lis
 | `list_channels` | List workspace channels |
 | `get_channel_history` | Read channel message history |
 | `get_thread_replies` | Read a thread: parent message and replies |
-| `get_file` | Download a shared file; text files are returned inline |
+| `get_file` | Download a shared file into `~/Downloads/slack-mcp`; first 64 KB of text files returned inline |
 | `search_messages` | Search messages across the workspace |
 | `add_reaction` | Add an emoji reaction |
 | `remove_reaction` | Remove an emoji reaction |
@@ -92,3 +92,7 @@ uv run mcp dev src/slack_mcp_server/server.py  # MCP Inspector
 `get_file` needs the `files:read` user scope. Installations authorized before it was added keep
 working for every other tool; to read files, add `files:read` to the Slack app's User Token
 Scopes and run `slack_authenticate` again (or regenerate the `xoxp` token in direct token mode).
+
+`get_file` only sends the token to `https://*.slack.com`, following redirects by hand while they stay
+there. Files stored outside Slack (Google Drive, Dropbox) and native Slack documents (canvas, posts)
+are not downloaded; their link is returned. Downloads are capped at 100 MB and written atomically.

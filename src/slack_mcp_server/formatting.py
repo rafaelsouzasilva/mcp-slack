@@ -24,3 +24,9 @@ def format_message(msg: dict) -> str:
         line += f" [thread: {msg['reply_count']} replies]"
 
     return line
+
+
+def format_thread(messages: list[dict], thread_ts: str, paginated: bool) -> str:
+    if paginated and messages and messages[0].get("ts") == thread_ts:
+        messages = messages[1:]
+    return "\n".join(format_message(msg) for msg in messages)
