@@ -1,5 +1,6 @@
 from mcp.server.fastmcp import Context, FastMCP
 
+from slack_mcp_server.formatting import format_message
 from slack_mcp_server.slack_client import SlackClientManager
 
 
@@ -86,16 +87,48 @@ def register_channel_tools(mcp: FastMCP) -> None:
         if not messages:
             return "No messages found."
 
-        lines = []
-        for msg in reversed(messages):
-            user = msg.get("user", "unknown")
-            text = msg.get("text", "")
-            ts = msg.get("ts", "")
-            thread = (
-                f" [thread: {msg.get('reply_count', 0)} replies]"
-                if msg.get("reply_count")
-                else ""
-            )
-            lines.append(f"[{ts}] <{user}> {text}{thread}")
+        return "\n".join(format_message(msg) for msg in reversed(messages))
 
-        return "\n".join(lines)
+    @mcp.tool()
+    async def get_thread_replies(
+        ctx: Context,
+        channel: str,
+        thread_ts: str,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> str:
+        """Read a thread: the parent message followed by its replies, oldest first.
+
+        Shared files are listed as [file: name (F0123..., mimetype)]; use get_file
+        with the id to read one.
+
+        Args:
+            channel: Channel ID the thread lives in.
+            thread_ts: Timestamp of the thread's parent message (the p<digits> in a
+                permalink, with a dot before the last six digits).
+            limit: Max number of messages to return (default 100).
+            cursor: Pagination cursor for the next page.
+        """
+        app_ctx = ctx.request_context.lifespan_context
+        manager = SlackClientManager(app_ctx["token_store"], app_ctx["config"])
+        client = await manager.get_client()
+
+        kwargs: dict = {"channel": channel, "ts": thread_ts, "limit": limit}
+        if cursor:
+            kwargs["cursor"] = cursor
+
+        response = await client.conversations_replies(**kwargs)
+        messages = response.get("messages", [])
+
+        if not messages:
+            return "No messages found."
+
+        result = "\n".join(format_message(msg) for msg in messages)
+
+        next_cursor = (
+            response.get("response_metadata", {}).get("next_cursor", "") or ""
+        )
+        if next_cursor:
+            result += f"\n\n(More replies available, use cursor: '{next_cursor}')"
+
+        return result

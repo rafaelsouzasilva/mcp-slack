@@ -7,7 +7,7 @@ An MCP server that lets you interact with Slack from Claude Code or any MCP clie
 - **Per-user OAuth** — authenticate with your own Slack identity
 - **User tokens (xoxp)** — messages appear as sent by you, search works correctly
 - **Multi-workspace** — connect to multiple Slack workspaces
-- **11 tools** — messaging, channels, search, reactions, workspace management
+- **13 tools** — messaging, channels, threads, files, search, reactions, workspace management
 
 ## Prerequisites
 
@@ -20,6 +20,7 @@ An MCP server that lets you interact with Slack from Claude Code or any MCP clie
    - `search:read` — search messages
    - `reactions:write`, `reactions:read` — reactions
    - `users:read` — user info
+   - `files:read` — download shared files
 4. Note your Client ID and Client Secret
 
 ## Setup
@@ -72,6 +73,8 @@ Restart Claude Code, then use tools like `post_message`, `search_messages`, `lis
 | `reply_to_thread` | Reply in a thread |
 | `list_channels` | List workspace channels |
 | `get_channel_history` | Read channel message history |
+| `get_thread_replies` | Read a thread: parent message and replies |
+| `get_file` | Download a shared file; text files are returned inline |
 | `search_messages` | Search messages across the workspace |
 | `add_reaction` | Add an emoji reaction |
 | `remove_reaction` | Remove an emoji reaction |
@@ -83,3 +86,9 @@ uv run pytest              # Run tests
 uv run ruff check src/     # Lint
 uv run mcp dev src/slack_mcp_server/server.py  # MCP Inspector
 ```
+
+## Upgrading: files:read
+
+`get_file` needs the `files:read` user scope. Installations authorized before it was added keep
+working for every other tool; to read files, add `files:read` to the Slack app's User Token
+Scopes and run `slack_authenticate` again (or regenerate the `xoxp` token in direct token mode).

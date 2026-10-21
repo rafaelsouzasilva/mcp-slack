@@ -13,6 +13,7 @@
    - `search:read` — buscar mensagens
    - `reactions:write`, `reactions:read` — reactions
    - `users:read` — info de usuários
+   - `files:read` — baixar arquivos compartilhados
 6. Clique em **Install to Workspace** → **Allow**
 7. Copie o **User OAuth Token** (`xoxp-...`) que aparece
 

@@ -1,5 +1,6 @@
 from mcp.server.fastmcp import Context, FastMCP
 
+from slack_mcp_server.formatting import format_file
 from slack_mcp_server.slack_client import SlackClientManager
 
 
@@ -48,7 +49,9 @@ def register_search_tools(mcp: FastMCP) -> None:
             if len(text) > 200:
                 text = text[:200] + "..."
 
-            lines.append(f"\n[{ts}] #{channel_name} <{user}> {text}")
+            files = " ".join(format_file(f) for f in msg.get("files") or [])
+            line = f"\n[{ts}] #{channel_name} <{user}> {text}".rstrip()
+            lines.append(f"{line} {files}" if files else line)
             if permalink:
                 lines.append(f"  Link: {permalink}")
 
